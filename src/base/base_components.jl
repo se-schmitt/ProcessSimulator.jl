@@ -1,184 +1,121 @@
 # Base components
-
-@connector function State(ms::MaterialSource;N_c=1,n_bnds=(-Inf,Inf),phase="unknown",name)
-    vars = @variables begin
-        T(t),               [description="temperature", unit="K", output=true]
-        p(t),               [description="pressure", unit="Pa", output=true]
-        ϱ(t),               [description="density", unit="mol/m³", output=true]
-        (nᵢ(t))[1:N_c],     [description="molar flow", unit="mol/s", bounds=n_bnds, output=true]
-        n(t),               [description="total molar flow", unit="mol/s", output=true]
+@mtkmodel MaterialFlow begin
+    @structural_parameters begin
+        ms = missing
+        N_c::Int = 1
+        phase::String = "unknown"
     end
-
-    eqs = [
-        # Density
-        ϱ ~ ms.molar_density(p,T,nᵢ;phase=phase)
-        n ~ sum(nᵢ)
-    ]
-
-    pars = @parameters begin
-    end
-
-    ODESystem(eqs, t, collect(Iterators.flatten(vars)), pars; name)
-end
-
-"""
-    MaterialStream(ms::MaterialSource;N_c=1, phase="unknown", flowdir=:generic, name)
-
-Create a material stream connector (between points `A` and `B`). Constant pressure and temperature are assumed. 
-...
-"""
-@connector function MaterialStream(ms::MaterialSource;N_c=1, phase="unknown", flowdir=:AB, name)
-    if flowdir == :bidir
-        boundsA = boundsB = (-Inf,Inf)
-    elseif flowdir == :AB
-        boundsA = (-Inf,0)
-        boundsB = (0,Inf)
-    elseif flowdir == :BA
-        boundsA = (0,Inf)
-        boundsB = (-Inf,0)
-    else
-        error("Invalid type")
-    end
-
-    @named A = State(ms;N_c=N_c,n_bnds=boundsA,phase=phase)
-    @named B = State(ms;N_c=N_c,n_bnds=boundsB,phase=phase)
-
-    eqs = [
-        scalarize(0.0 .~ A.nᵢ .+ B.nᵢ)...   # Mass balance
-        A.T ~ B.T                           # Thermal equilibrium
-        A.p ~ B.p                           # Mechanical equilibrium
-    ]
     
-    ODESystem(eqs, t; systems=[A,B], name)
+    @components begin
+        s = TϱState(N_c=N_c,phase=phase)
+        c = PHxConnector(N_c=N_c,phase=phase)
+    end
+    
+    @equations begin
+        c.p ~ ms.pressure(s.ϱ,s.T,c.xᵢ)
+        c.h ~ ms.VT_enthalpy(s.ϱ,s.T,c.xᵢ)
+        1.0 ~ sum([xᵢ for xᵢ in c.xᵢ])
+        scalarize(c.xᵢ .~ s.nᵢ ./ c.n)
+    end
 end
 
-"""
-    EnergyStream(;name)
-
-Create an energy stream connector (between poinnts `A` and `B`).
-...
-"""
-@connector function HeatStream(; name)
-    vars = @variables begin
-        QA(t),              [description="heat A", unit="J/s", output=true]
-        QB(t),              [description="heat B", unit="J/s", output=true]
+@mtkmodel TϱState begin
+    @structural_parameters begin
+        N_c::Int = 1
+        phase::String = "unknown"
     end
-
-    eqs = [
-        0.0 ~ QA + QB
-    ]
-
-    ODESystem(eqs, t, collect(Iterators.flatten(vars)), []; name)
+    
+    @variables begin
+        T(t),               [description="temperature", output=true]    #, unit=u"K"]
+        ϱ(t),               [description="density", output=true]        #, unit=u"mol m^-3"]
+        nᵢ(t)[1:N_c]=1/N_c, [description="mole fractions", output=true] #, unit=u"mol s^-1"]
+    end
 end
 
-
-@connector function WorkStream(; name)
-    vars = @variables begin
-        WA(t),              [description="work A", unit="J/s", output=true]
-        WB(t),              [description="work B", unit="J/s", output=true]
+@connector PHxConnector begin 
+    @structural_parameters begin 
+        N_c::Int = 1
+        phase::String = "unknown"
     end
-
-    eqs = [
-        0.0 ~ WA + WB
-    ]
-
-    ODESystem(eqs, t, collect(Iterators.flatten(vars)), []; name)
+    
+    @variables begin
+        p(t),               [description="pressure"]                        #, unit=u"Pa"]
+        h(t),               [description="molar enthalpy", connect=Stream]  #, unit=u"J mol^-1"]
+        xᵢ(t)[1:N_c]=1/N_c, [description="mole fractions", connect=Stream]  #, unit=u"mol mol^-1"]
+        n(t),               [description="total molar flow", connect=Flow]  #, unit=u"mol s^-1"]
+    end
 end
 
-"""
-    ControlVolume(ms::MaterialSource; ... name)
-
-Create a control volume with constant pressure and temperature and chemical equilibrium.
-...
-""",
-@component function TPControlVolume(ms::MaterialSource;
-                                    N_states,
-                                    N_heats=0,
-                                    N_works=0,
-                                    reactions=Vector{ODESystem}[],
-                                    N_ph=1, phases=repeat(["unknown"],N_ph),
-                                    name)
-    # Init 
-    N_c = length(ms.components)
-    states = [State(ms;N_c=N_c) for i in 1:N_states]
-
-    vars = @variables begin
-        T(t),                   [description="temperature", unit="K", output=true, bounds=(0,Inf)]
-        p(t),                   [description="pressure", unit="Pa", output=true, bounds=(0,Inf)]
-        ϱ(t)[1:N_ph],           [description="density", unit="mol/m³", output=true, bounds=(0,Inf)]
-        (nᵢ(t))[1:N_ph,1:N_c],  [description="molar holdup", unit="mol", output=true, bounds=(0,Inf)]
-        n(t),                   [description="total molar holdup", unit="mol", output=true, bounds=(0,Inf)]
-        U(t),                   [description="internal energy", unit="J", output=true]
-        ΔH(t),                  [description="enthalpy difference inlets/outlets", unit="J/s", output=true]
-        ΔHᵣ(t),                 [description="enthalpy difference reactions", unit="J/s", output=true]
-        ΔE(t),                  [description="added/removed heat or work", unit="J/s", output=true]
+@connector HeatConnector begin
+    @variables begin
+        Q(t)#,              [description="heat flux", connect=Flow]  #, unit=u"J s^-1"]
     end
-    if N_heats > 0
-        @variables (Qs(t))[1:N_heats], [description="Heats added/removed", unit="J/s", output=true]
-        vars = vcat(vars, Qs)
-    else
-        Qs = 0.0
+end
+
+@connector WorkConnector begin
+    @variables begin
+        W(t)#,              [description="power", connect=Flow]      #, unit=u"J s^1"]
     end
-    if N_works > 0
-        @variables (Ws(t))[1:N_works], [description="Work added/removed", unit="J/s", output=true]
-        vars = vcat(vars, Ws)
-    else
-        Ws = 0.0
+end
+
+@mtkmodel SimpleControlVolume begin
+
+    @structural_parameters begin
+        ms = missing
+        N_c::Int = 1
+        N_flows::Int = 0
+        N_heats::Int = 0
+        N_works::Int = 0
+        N_phases::Int = 1
+        phases = ["unknown"]
+        stationary::Bool = true
     end
 
-    eqs = [
-        ΔH ~ sum([ms.VT_enthalpy(st.ϱ,st.T,st.nᵢ) for st in states])
-        ΔHᵣ ~ 0.0 # TODO: Reactions -> sum([reaction.ΔH for reaction in reactions])
-        ΔE ~ sum(Qs) + sum(Ws)
+    @components begin
+        flows = [MaterialFlow(ms=ms,name=Symbol("f$i")) for i in 1:N_flows]
+        works = [WorkConnector(name=Symbol("w$i")) for i in 1:N_works]
+        heats = [HeatConnector(name=Symbol("q$i")) for i in 1:N_heats]
+    end
+
+    @variables begin
+        ΔH(t), [description="enthalpy difference inlets/outlets", output=true]  #, unit=u"J s^-1"]
+        ΔE(t), [description="added/removed heat or work", output=true]          #, unit=u"J s^-1"]
+    end
+
+    @equations begin
+        ΔH ~ sum([f.c.h*f.c.n for f in flows])
+        ΔE ~ (isempty(heats) ? 0.0 : sum([q.Q for q in heats])) + (isempty(works) ? 0.0 : sum([w.W for w in works]))
         # Energy balance
-        D(U) ~ ΔH + ΔE + ΔHᵣ
+        (stationary ? 0.0 : D(U)) ~ ΔH + ΔE
         # Mole balance
-        [D(sum(nᵢ[:,j])) ~ sum([st.nᵢ[j] for st in states]) for j in 1:N_c][:]
-        n ~ sum(nᵢ)
-        # TODO: Definition of chemical equilibrium and reactions outside of the control volume obejct?
-        # Thermodynamic system properties
-        [ϱ[i] ~ ms.molar_density(p,T,nᵢ[i,:];phase=phases[i]) for i in 1:N_ph]
-        U ~ sum([ms.VT_internal_energy(ϱ[i],T,nᵢ[i,:]) for i in 1:N_ph])
-    ]
-
-    ODESystem([eqs...], t, collect(Iterators.flatten(vars)), []; name, systems=sys)
+        [(stationary ? 0.0 : D(sum(nᵢ[:,j]))) ~ sum([f.c.n*f.c.xᵢ[j] for f in flows]) for j in 1:N_c][:]
+    end
 end
 
-@component function SimpleControlVolume(ms::MaterialSource;
-                                        N_states,
-                                        N_heats=0,
-                                        N_works=0,
-                                        N_ph=1, phases=repeat(["unknown"],N_ph),
-                                        name)
-    # Init 
-    N_c = length(ms.components)
-    states = [State(ms;N_c=N_c,name=Symbol("s$i")) for i in 1:N_states]
+# TODO: extending models with array components does not work
+# @mtkmodel TPControlVolume begin
 
-    vars = @variables begin
-        ΔH(t), [description="Enthalpy difference inlets/outlets", unit="J/s", output=true]
-        ΔE(t), [description="Added/removed heat or work", unit="J/s", output=true]
-    end
-    if N_heats > 0
-        @variables (Qs(t))[1:N_heats], [description="Heats added/removed", unit="J/s", output=true]
-        vars = vcat(vars, Qs)
-    else
-        Qs = zeros(1)
-    end
-    if N_works > 0
-        @variables (Ws(t))[1:N_works], [description="Work added/removed", unit="J/s", output=true]
-        vars = vcat(vars, Ws)
-    else
-        Ws = zeros(1)
-    end
+#     @extend SimpleControlVolume(;ms, N_c, N_flows, N_heats, N_works, N_phases, phases)
 
-    eqs = [
-        ΔH ~ sum([ms.VT_enthalpy(st.ϱ,st.T,st.nᵢ)*sign(st.nᵢ[1]) for st in states])
-        ΔE ~ sum([Q for Q in Qs]) + sum([W for W in Ws])
-        # Energy balance
-        0.0 ~ ΔH + ΔE
-        # Mole balance
-        [0.0 ~ sum([st.nᵢ[j] for st in states]) for j in 1:N_c][:]
-    ]
+#     @variables begin
+#         T(t),                       [description="temperature", output=true]          #, unit=u"K"]
+#         p(t),                       [description="pressure", output=true]             #, unit=u"Pa"]
+#         ϱ(t)[1:N_phases],           [description="density", output=true]              #, unit=u"mol m^-3"]
+#         (nᵢ(t))[1:N_phases,1:N_c],  [description="molar holdup", output=true]         #, unit=u"mol"]
+#         n(t),                       [description="total molar holdup", output=true]   #, unit=u"mol"]
+#         U(t),                       [description="internal energy", output=true]      #, unit=u"J"]
+#     end
 
-    ODESystem([eqs...], t, collect(Iterators.flatten(vars)), []; name, systems=states)
-end
+#     # reactions
+#     #TODO: concept for modeling reactions (model reation enthalpy implicitly in MateiralSource function for enthalpy, here only the reaction rates and stochiometry)
+#     # @parameters/@component begin     
+#     # end
+
+#     @equations begin
+#         # Mole balance
+#         n ~ sum(nᵢ)
+#         # Thermodynamic system properties
+#         [ϱ[i] ~ ms.molar_density(p,T,nᵢ[i,:];phase=phases[i]) for i in 1:N_ph]
+#         U ~ sum([ms.VT_internal_energy(ϱ[i],T,nᵢ[i,:]) for i in 1:N_ph])
+#     end
+# end

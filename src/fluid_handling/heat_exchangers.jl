@@ -1,17 +1,13 @@
-@component function SimpleIsobaricHeatExchanger(ms::MaterialSource; name)
-
-    # Subsystems
-    @named cv = SimpleControlVolume(ms;N_states=2,N_heats=1)
-    sys = [cv]
-
-    # Variables
-    vars = @variables begin
+@mtkmodel SimpleIsobaricHeatExchanger begin
+    @structural_parameters begin
+        ms = missing
     end
 
-    # Equations
-    eqs = [
-        cv.s1.p ~ cv.s2.p,
-    ]
+    @components begin
+        cv = SimpleControlVolume(ms=ms,N_flows=2,N_heats=1)
+    end
 
-    return ODESystem(eqs, t, vars, []; systems=sys, name)
+    @equations begin
+        cv.f1.c.p ~ cv.f2.c.p
+    end
 end

@@ -21,56 +21,85 @@ matsource = PS.MaterialSource(
     (p,T,n) -> NaN
 )
 
-# Create flowsheet
-# Components
-comp_12 = PS.SimpleAdiabaticCompressor(matsource; name=:comp_12)
-heat_22⁺ = PS.SimpleIsobaricHeatExchanger(matsource; name=:heat_22⁺)  
-heat_2⁺3 = PS.SimpleIsobaricHeatExchanger(matsource; name=:heat_2⁺2)
-turb_34 = PS.SimpleAdiabaticCompressor(matsource; name=:turb_34)
-heat_44⁺ = PS.SimpleIsobaricHeatExchanger(matsource; name=:heat_44⁺)
-heat_4⁺1 = PS.SimpleIsobaricHeatExchanger(matsource; name=:heat_4⁺1)
-sys = [comp_12,heat_22⁺,heat_2⁺3,turb_34,heat_44⁺,heat_4⁺1]
+# Create flowsbheet
+# Create flowsbheet
+@mtkmodel Flowsheet begin
+    @structural_parameters begin
+        ms = missing
+    end
 
-# Connections
-con_eqs = Equation[]
-append!(con_eqs,PS.connect_states(comp_12.cv.s2,heat_22⁺.cv.s1; is_stream=true))
-append!(con_eqs,PS.connect_states(heat_22⁺.cv.s2,heat_2⁺3.cv.s1; is_stream=true))
-append!(con_eqs,PS.connect_states(heat_2⁺3.cv.s2,turb_34.cv.s1; is_stream=true))
-append!(con_eqs,PS.connect_states(turb_34.cv.s2,heat_44⁺.cv.s1; is_stream=true))
-append!(con_eqs,PS.connect_states(heat_44⁺.cv.s2,heat_4⁺1.cv.s1; is_stream=true))
+    @components begin
+        comp_12 = PS.SimpleAdiabaticCompressor(ms=ms)
+        heat_22⁺ = PS.SimpleIsobaricHeatExchanger(ms=ms)  
+        heat_2⁺3 = PS.SimpleIsobaricHeatExchanger(ms=ms)
+        turb_34 = PS.SimpleAdiabaticCompressor(ms=ms)
+        heat_44⁺ = PS.SimpleIsobaricHeatExchanger(ms=ms)
+        heat_4⁺1 = PS.SimpleIsobaricHeatExchanger(ms=ms)
+    end
 
-# Additional connections (internal heat exchanger)
-append!(con_eqs,[heat_22⁺.cv.Qs[1] ~ -heat_4⁺1.cv.Qs[1]])
+    @equations begin
+        connect(comp_12.cv.f2.c,  heat_22⁺.cv.f1.c)
+        connect(heat_22⁺.cv.f2.c, heat_2⁺3.cv.f1.c)
+        connect(heat_2⁺3.cv.f2.c, turb_34.cv.f1.c)
+        connect(turb_34.cv.f2.c,  heat_44⁺.cv.f1.c)
+        connect(heat_44⁺.cv.f2.c, heat_4⁺1.cv.f1.c)
+        connect(heat_4⁺1.cv.f2.c, comp_12.cv.f1.c)
+        heat_22⁺.cv.q1.Q ~ -heat_4⁺1.cv.q1.Q
+    end
+end
 
-@named flowsheet_ = ODESystem(con_eqs, t, [], []; systems=sys)
+@named flowsheet_ = Flowsheet(ms=matsource)
 
-giv = [
-    comp_12.cv.s1.nᵢ[1] => 1.0,         # T1
-    comp_12.cv.s1.T => 298.15,          # T1
-    comp_12.cv.s1.p => 1e5,             # p1
-    comp_12.cv.s2.p => 1e6,             # p2
-    heat_22⁺.cv.s2.T => 298.15,         # T2⁺ 
-    turb_34.cv.s1.T => 253.15,          # T3
-    turb_34.cv.s2.p => 1e5,             # p4
-    heat_44⁺.cv.s2.T => 253.15,         # T4⁺
+inp_str = [
+    "(comp_12₊cv₊f1₊s₊nᵢ(t))[1]",
+    # "comp_12₊cv₊f1₊c₊n(t)",
+    "comp_12₊cv₊f1₊s₊T(t)",
+    "comp_12₊cv₊f1₊c₊p(t)",
+    "comp_12₊cv₊f2₊c₊p(t)",
+    "heat_22⁺₊cv₊f2₊s₊T(t)",
+    "turb_34₊cv₊f1₊s₊T(t)",
+    "turb_34₊cv₊f2₊c₊p(t)",
+    "heat_44⁺₊cv₊f2₊s₊T(t)",
+]
+out_str = [
+    "heat_44⁺₊cv₊q1₊Q(t)",
+    "comp_12₊cv₊w1₊W(t)",
+    "turb_34₊cv₊w1₊W(t)"
+]
+
+unk = unknowns(flowsheet_)
+inp = unk[[findfirst(str .== string.(unk)) for str in inp_str]]
+out = unk[[findfirst(str .== string.(unk)) for str in out_str]]
+
+flowsheet = structural_simplify(flowsheet_,(inp,out))
+
+inp = [
+    (comp_12.cv.f1.c.xᵢ)[1] => 1.0,     # T1
+    comp_12.cv.f1.c.n => 1.0,           # T1
+    comp_12.cv.f1.s.T => 298.15,        # T1
+    comp_12.cv.f1.c.p => 1e5,           # p1
+    comp_12.cv.f2.c.p => 1e6,           # p2
+    heat_22⁺.cv.f2.s.T => 298.15,       # T2⁺ 
+    turb_34.cv.f1.s.T => 253.15,        # T3
+    turb_34.cv.f2.c.p => 1e5,           # p4
+    heat_44⁺.cv.f2.s.T => 253.15,       # T4⁺
     comp_12.ηᴱ => 1.0,                  # ηᴱ
     turb_34.ηᴱ => 1.0                   # ηᴱ
 ]
-unk = [
-    heat_44⁺.cv.Qs[1],
-    comp_12.cv.Ws[1],
-    turb_34.cv.Ws[1]
-]
 
-flowsheet,idx = structural_simplify(flowsheet_, (first.(giv), first.(unk)))
+
+# @mtkbuild flowsheet = Flowsheet() (first.(giv),unk)        # or: 'io=(first.(giv),unk)'?
+
+@named flowsheet = Flowsheet()
+structural_simplify!(flowsheet,(first.(giv),unk))
 
 u0 = [
     comp_12.cv.s2.T => 1.0,
     comp_12.cv_s.s2.T => 1.0,
-    (comp_12.cv.Ws)[1] => -1.0,
+    comp_12.cv.w1.W => -1.0,
     turb_34.cv.s2.T => 1.0,
     turb_34.cv_s.s2.T => 1.0,
-    (turb_34.cv.Ws)[1] => 1.0,
+    turb_34.cv.w1.W => 1.0,
     heat_4⁺1.cv.s2.T => 1.0,
 ]
 
